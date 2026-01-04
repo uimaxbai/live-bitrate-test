@@ -1,0 +1,853 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FLAC Live Player + Stats</title>
+    <script src="coi-serviceworker.min.js"></script>
+    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
+    <style>
+      body {
+        background: #1a1a1a;
+        color: #fff;
+        font-family: system-ui, -apple-system, sans-serif;
+        padding: 20px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+      }
+      .container {
+        max-width: 800px;
+        width: 100%;
+      }
+
+      /* Visualizer */
+      .vis-wrapper {
+        position: relative;
+        height: 160px;
+        background: #000;
+        border: 1px solid #444;
+        border-radius: 4px;
+        overflow: hidden;
+        margin-bottom: 20px;
+      }
+      canvas {
+        width: 100%;
+        height: 100%;
+      }
+
+      /* Controls */
+      .controls {
+        background: #2d2d2d;
+        padding: 25px;
+        border-radius: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+      }
+
+      .transport {
+        display: flex;
+        align-items: center;
+        gap: 15px;
+      }
+
+      #play-btn {
+        width: 50px;
+        height: 50px;
+        border-radius: 50%;
+        border: none;
+        background: #00ff9d;
+        color: #000;
+        font-size: 20px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: transform 0.1s, background 0.2s;
+      }
+      #play-btn:hover {
+        background: #00cc7d;
+        transform: scale(1.05);
+      }
+      #play-btn:active {
+        transform: scale(0.95);
+      }
+      #play-btn:disabled {
+        background: #444;
+        color: #666;
+        cursor: not-allowed;
+        transform: none;
+      }
+
+      .slider-container {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+      }
+      .time-display {
+        display: flex;
+        justify-content: space-between;
+        font-size: 12px;
+        color: #888;
+        margin-bottom: 5px;
+        font-weight: bold;
+      }
+      input[type="range"] {
+        width: 100%;
+        accent-color: #00ff9d;
+        cursor: pointer;
+      }
+
+      /* Stats Row */
+      .stats-row {
+        display: flex;
+        justify-content: space-between;
+        background: #222;
+        padding: 8px 12px;
+        border-radius: 4px;
+        font-size: 12px;
+        color: #aaa;
+        border: 1px solid #333;
+      }
+      .stats-row strong {
+        color: #fff;
+        margin-left: 5px;
+      }
+
+      /* Settings Row */
+      .settings-row {
+        display: flex;
+        flex-direction: column;
+        background: #222;
+        padding: 15px;
+        border-radius: 6px;
+        gap: 15px;
+      }
+
+      .format-selector {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 15px;
+        font-size: 13px;
+        color: #ccc;
+      }
+      .format-selector label {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        cursor: pointer;
+      }
+      .format-selector input[type="radio"] {
+        accent-color: #00ff9d;
+      }
+
+      .quality-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .bitrate-group {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex: 1;
+        margin-right: 20px;
+      }
+      .bitrate-val {
+        color: #00ff9d;
+        font-weight: bold;
+        min-width: 60px;
+        text-align: right;
+        font-size: 13px;
+      }
+
+      .btn-secondary {
+        padding: 8px 16px;
+        background: #444;
+        border: none;
+        color: #fff;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 11px;
+        font-weight: bold;
+        text-transform: uppercase;
+      }
+      .btn-secondary:hover {
+        background: #555;
+      }
+      .btn-secondary:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .file-area {
+        margin-top: 20px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+
+      #loader {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        font-size: 10px;
+        color: #00ff9d;
+        font-weight: bold;
+        display: none;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        background: rgba(0, 0, 0, 0.7);
+        padding: 4px 8px;
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="vis-wrapper">
+        <canvas id="spectrogram"></canvas>
+        <div id="loader">PROCESSING...</div>
+      </div>
+
+      <audio
+        id="audio-player"
+        crossorigin="anonymous"
+        style="display: none"
+      ></audio>
+
+      <div class="controls">
+        <div class="transport">
+          <button id="play-btn" disabled>▶</button>
+          <div class="slider-container">
+            <div class="time-display">
+              <span id="current-time">0:00</span>
+              <span id="total-time">0:00</span>
+            </div>
+            <input
+              type="range"
+              id="seek-slider"
+              min="0"
+              max="100"
+              value="0"
+              disabled
+            />
+          </div>
+        </div>
+
+        <div class="settings-row">
+          <div class="format-selector">
+            <label
+              ><input type="radio" name="fmt" value="opus" checked />
+              Opus</label
+            >
+            <label><input type="radio" name="fmt" value="mp3" /> MP3</label>
+            <label><input type="radio" name="fmt" value="aac" /> AAC</label>
+            <label
+              ><input type="radio" name="fmt" value="ogg" /> Ogg (Vorbis)</label
+            >
+            <label><input type="radio" name="fmt" value="flac" /> FLAC</label>
+          </div>
+
+          <div class="stats-row">
+            <span>Original Size: <strong id="size-orig">0.0 MB</strong></span>
+            <span>Est. Output Size: <strong id="size-est">0.0 MB</strong></span>
+          </div>
+
+          <div class="quality-row">
+            <div class="bitrate-group">
+              <span id="quality-label" style="color: #888; font-size: 12px"
+                >Bitrate</span
+              >
+              <input
+                type="range"
+                id="bitrate-slider"
+                min="6"
+                max="510"
+                value="128"
+                step="2"
+                disabled
+              />
+              <span class="bitrate-val" id="bitrate-display">128k</span>
+            </div>
+            <button class="btn-secondary" id="btn-full" disabled>
+              Download Full
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="file-area">
+        <input
+          type="file"
+          id="uploader"
+          accept=".flac,.wav"
+          style="color: #666"
+        />
+        <button class="btn-secondary" id="btn-example">
+          Load Example File
+        </button>
+      </div>
+    </div>
+
+    <script>
+      const { createFFmpeg, fetchFile } = FFmpeg;
+      const PREVIEW_DURATION = 10;
+      const ffmpeg = createFFmpeg({ log: false });
+
+      const CODEC_CONFIG = {
+        opus: {
+          min: 6,
+          max: 510,
+          step: 2,
+          default: 128,
+          label: "Bitrate",
+          unit: "k",
+        },
+        mp3: {
+          min: 32,
+          max: 320,
+          step: 2,
+          default: 128,
+          label: "Bitrate",
+          unit: "k",
+        },
+        aac: {
+          min: 32,
+          max: 320,
+          step: 2,
+          default: 128,
+          label: "Bitrate",
+          unit: "k",
+        },
+        ogg: {
+          min: 48,
+          max: 500,
+          step: 2,
+          default: 128,
+          label: "Bitrate",
+          unit: "k",
+        },
+        flac: {
+          min: 0,
+          max: 12,
+          step: 1,
+          default: 5,
+          label: "Compression",
+          unit: "Lvl",
+        },
+      };
+
+      let state = {
+        file: null,
+        duration: 0,
+        currentStartTime: 0,
+        nextChunkData: null,
+        isDragging: false,
+        isProcessing: false,
+        format: "opus",
+        fileName: "audio",
+      };
+
+      const ui = {
+        playBtn: document.getElementById("play-btn"),
+        seekSlider: document.getElementById("seek-slider"),
+        currTime: document.getElementById("current-time"),
+        totalTime: document.getElementById("total-time"),
+        bitrateSlider: document.getElementById("bitrate-slider"),
+        bitrateDisplay: document.getElementById("bitrate-display"),
+        qualityLabel: document.getElementById("quality-label"),
+        sizeOrig: document.getElementById("size-orig"),
+        sizeEst: document.getElementById("size-est"),
+        btnFull: document.getElementById("btn-full"),
+        btnExample: document.getElementById("btn-example"),
+        audio: document.getElementById("audio-player"),
+        loader: document.getElementById("loader"),
+        uploader: document.getElementById("uploader"),
+        formats: document.querySelectorAll('input[name="fmt"]'),
+      };
+
+      // --- 1. Event Listeners ---
+
+      ui.playBtn.addEventListener("click", () => {
+        initVisualizer();
+        if (ui.audio.paused) {
+          ui.audio.play();
+          ui.playBtn.innerText = "❚❚";
+        } else {
+          ui.audio.pause();
+          ui.playBtn.innerText = "▶";
+        }
+      });
+
+      ui.audio.addEventListener("play", () => {
+        if (visInitialized) drawVisualizer();
+      });
+
+      ui.audio.addEventListener("timeupdate", () => {
+        if (state.isDragging || state.isProcessing) return;
+        const realTime = state.currentStartTime + ui.audio.currentTime;
+        ui.seekSlider.value = realTime;
+        ui.currTime.innerText = formatTime(realTime);
+      });
+
+      ui.audio.addEventListener("ended", async () => {
+        const expectedNextTime = state.currentStartTime + PREVIEW_DURATION;
+        if (expectedNextTime >= state.duration) {
+          ui.playBtn.innerText = "▶";
+          ui.seekSlider.value = state.duration;
+          return;
+        }
+        if (
+          state.nextChunkData &&
+          state.nextChunkData.startTime === expectedNextTime
+        ) {
+          playBlob(state.nextChunkData.url, expectedNextTime);
+          state.nextChunkData = null;
+          preloadNextChunk(expectedNextTime + PREVIEW_DURATION);
+        } else {
+          state.currentStartTime = expectedNextTime;
+          await playCurrentChunk();
+        }
+      });
+
+      ui.seekSlider.addEventListener("input", (e) => {
+        state.isDragging = true;
+        ui.currTime.innerText = formatTime(e.target.value);
+      });
+
+      ui.seekSlider.addEventListener("change", async (e) => {
+        state.isDragging = false;
+        state.nextChunkData = null;
+        state.currentStartTime = parseFloat(e.target.value);
+        await playCurrentChunk();
+      });
+
+      ui.formats.forEach((radio) => {
+        radio.addEventListener("change", async (e) => {
+          const oldFormat = state.format;
+          const newFormat = e.target.value;
+          state.format = newFormat;
+
+          const oldConf = CODEC_CONFIG[oldFormat];
+          const newConf = CODEC_CONFIG[newFormat];
+          const currentVal = parseInt(ui.bitrateSlider.value);
+
+          ui.bitrateSlider.min = newConf.min;
+          ui.bitrateSlider.max = newConf.max;
+          ui.bitrateSlider.step = newConf.step;
+          ui.qualityLabel.innerText = newConf.label;
+
+          if (oldConf.unit === "k" && newConf.unit === "k") {
+            if (currentVal >= newConf.min && currentVal <= newConf.max) {
+              ui.bitrateSlider.value = currentVal;
+            } else {
+              ui.bitrateSlider.value = newConf.default;
+            }
+          } else {
+            ui.bitrateSlider.value = newConf.default;
+          }
+
+          updateBitrateDisplay();
+          updateStats();
+
+          state.nextChunkData = null;
+          state.currentStartTime =
+            state.currentStartTime + ui.audio.currentTime;
+          await playCurrentChunk();
+        });
+      });
+
+      function updateStats() {
+        if (!state.file) return;
+        const origMB = state.file.size / (1024 * 1024);
+        ui.sizeOrig.innerText = `${origMB.toFixed(2)} MB`;
+
+        if (state.format === "flac") {
+          ui.sizeEst.innerText = "Variable";
+          return;
+        }
+        const bitrate = parseInt(ui.bitrateSlider.value);
+        const duration = state.duration;
+        const estimatedBytes = (bitrate * 1000 * duration) / 8;
+        const estimatedMB = estimatedBytes / (1024 * 1024);
+        ui.sizeEst.innerText = `~${estimatedMB.toFixed(2)} MB`;
+      }
+
+      function updateBitrateDisplay() {
+        const conf = CODEC_CONFIG[state.format];
+        const val = ui.bitrateSlider.value;
+        ui.bitrateDisplay.innerText =
+          (conf.unit === "Lvl" ? "Lvl " : "") +
+          val +
+          (conf.unit === "k" ? "k" : "");
+      }
+
+      ui.bitrateSlider.addEventListener("input", () => {
+        updateBitrateDisplay();
+        updateStats();
+      });
+
+      ui.bitrateSlider.addEventListener("change", async () => {
+        state.currentStartTime = state.currentStartTime + ui.audio.currentTime;
+        state.nextChunkData = null;
+        await playCurrentChunk();
+      });
+
+      // --- 2. File Loading & Chunked Downloader ---
+
+      // NEW: Chunked Downloader to appease the Service Worker gods
+      async function downloadFileChunked(url) {
+        // 1. Get HEAD to find content length
+        const headRes = await fetch(url, { method: "HEAD", mode: "cors" });
+        const size = parseInt(headRes.headers.get("content-length") || "0");
+
+        if (!size) {
+          // Fallback if no content-length: try single fetch
+          const res = await fetch(url, { mode: "cors" });
+          return await res.blob();
+        }
+
+        const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks (safe for SW)
+        const chunks = [];
+        let loaded = 0;
+
+        ui.loader.innerText = "0%";
+        ui.loader.style.display = "block";
+
+        while (loaded < size) {
+          const end = Math.min(loaded + CHUNK_SIZE, size) - 1;
+          const rangeVal = `bytes=${loaded}-${end}`;
+
+          // SW will intercept this, but it's small enough to succeed
+          const chunkRes = await fetch(url, {
+            headers: { Range: rangeVal },
+            mode: "cors",
+          });
+
+          if (!chunkRes.ok && chunkRes.status !== 206) {
+            throw new Error("Download failed at chunk " + rangeVal);
+          }
+
+          const chunkBlob = await chunkRes.blob();
+          chunks.push(chunkBlob);
+          loaded += chunkBlob.size;
+
+          // Progress Update
+          const percent = Math.floor((loaded / size) * 100);
+          ui.loader.innerText = `DL: ${percent}%`;
+        }
+
+        // Assemble chunks
+        return new Blob(chunks);
+      }
+
+      ui.uploader.addEventListener("change", async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        loadAudioFile(file, file.name);
+      });
+
+      ui.btnExample.addEventListener("click", async () => {
+        initVisualizer();
+        ui.loader.innerText = "STARTING...";
+        ui.loader.style.display = "block";
+        ui.btnExample.disabled = true;
+
+        try {
+          const url = "https://cdn.binimum.org/music/example.flac";
+
+          // Use Chunked Downloader
+          const blob = await downloadFileChunked(url);
+
+          blob.name = "example.flac";
+          await loadAudioFile(blob, "example.flac");
+        } catch (e) {
+          console.error(e);
+          alert("Error loading example: " + e.message);
+        } finally {
+          ui.btnExample.disabled = false;
+          ui.loader.style.display = "none";
+        }
+      });
+
+      async function loadAudioFile(fileBlob, fileName) {
+        state.file = fileBlob;
+        state.fileName = fileName;
+
+        const tempAudio = new Audio(URL.createObjectURL(fileBlob));
+        tempAudio.addEventListener("loadedmetadata", async () => {
+          state.duration = tempAudio.duration;
+          ui.seekSlider.max = state.duration;
+          ui.totalTime.innerText = formatTime(state.duration);
+
+          ui.seekSlider.disabled = false;
+          ui.bitrateSlider.disabled = false;
+          ui.playBtn.disabled = false;
+          ui.btnFull.disabled = false;
+
+          updateStats();
+
+          if (!ffmpeg.isLoaded()) await ffmpeg.load();
+
+          ui.loader.innerText = "PREPARING FILE...";
+          ui.loader.style.display = "block";
+
+          try {
+            ffmpeg.FS("unlink", "input.flac");
+          } catch (e) {}
+          ffmpeg.FS("writeFile", "input.flac", await fetchFile(fileBlob));
+
+          state.currentStartTime = 0;
+          state.nextChunkData = null;
+          await playCurrentChunk();
+        });
+      }
+
+      // --- 3. Transcoding Logic ---
+      function getFfmpegArgs(startTime, duration, outName) {
+        const quality = ui.bitrateSlider.value;
+        const args = [
+          "-ss",
+          startTime.toString(),
+          "-t",
+          duration.toString(),
+          "-i",
+          "input.flac",
+        ];
+
+        switch (state.format) {
+          case "mp3":
+            args.push("-c:a", "libmp3lame", "-b:a", `${quality}k`);
+            break;
+          case "aac":
+            args.push("-c:a", "aac", "-b:a", `${quality}k`);
+            break;
+          case "ogg":
+            args.push("-c:a", "libvorbis", "-b:a", `${quality}k`);
+            break;
+          case "opus":
+            args.push("-c:a", "libopus", "-b:a", `${quality}k`);
+            break;
+          case "flac":
+            args.push("-c:a", "flac", "-compression_level", quality);
+            break;
+        }
+        args.push(outName);
+        return args;
+      }
+
+      async function transcodeSegment(startTime, duration) {
+        const ext = state.format === "opus" ? "ogg" : state.format;
+        const outName = `part_${Math.floor(startTime)}.${ext}`;
+
+        try {
+          ffmpeg.FS("unlink", outName);
+        } catch (e) {}
+
+        const args = getFfmpegArgs(startTime, duration, outName);
+        await ffmpeg.run(...args);
+
+        const data = ffmpeg.FS("readFile", outName);
+
+        let mime = "audio/mpeg";
+        if (state.format === "opus") mime = "audio/ogg; codecs=opus";
+        if (state.format === "ogg") mime = "audio/ogg";
+        if (state.format === "flac") mime = "audio/flac";
+        if (state.format === "aac") mime = "audio/aac";
+
+        const blob = new Blob([data.buffer], { type: mime });
+        try {
+          ffmpeg.FS("unlink", outName);
+        } catch (e) {}
+
+        return URL.createObjectURL(blob);
+      }
+
+      async function playCurrentChunk() {
+        if (state.isProcessing) return;
+        state.isProcessing = true;
+        ui.loader.innerText = "PROCESSING...";
+        ui.loader.style.display = "block";
+        ui.playBtn.disabled = true;
+
+        ui.audio.pause();
+
+        try {
+          const url = await transcodeSegment(
+            state.currentStartTime,
+            PREVIEW_DURATION
+          );
+          playBlob(url, state.currentStartTime);
+          preloadNextChunk(state.currentStartTime + PREVIEW_DURATION);
+        } catch (e) {
+          console.error(e);
+        } finally {
+          state.isProcessing = false;
+          ui.loader.style.display = "none";
+          ui.playBtn.disabled = false;
+        }
+      }
+
+      async function preloadNextChunk(startTime) {
+        if (startTime >= state.duration) return;
+        try {
+          const url = await transcodeSegment(startTime, PREVIEW_DURATION);
+          state.nextChunkData = { url, startTime };
+        } catch (e) {
+          console.log("Preload failed", e);
+        }
+      }
+
+      function playBlob(url, realStartTime) {
+        ui.audio.src = url;
+        ui.audio.currentTime = 0;
+        state.currentStartTime = realStartTime;
+        ui.playBtn.innerText = "❚❚";
+        ui.audio.play().catch((e) => console.log("Playback interrupted", e));
+      }
+
+      // --- 4. Visualizer ---
+      let audioCtx,
+        analyser,
+        sourceNode,
+        visCtx,
+        visCanvas,
+        tempCanvas,
+        tempCtx;
+      let visInitialized = false;
+      let isDrawing = false;
+
+      function initVisualizer() {
+        if (visInitialized) {
+          if (audioCtx.state === "suspended") audioCtx.resume();
+          return;
+        }
+
+        visInitialized = true;
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 2048;
+
+        sourceNode = audioCtx.createMediaElementSource(ui.audio);
+        sourceNode.connect(analyser);
+        analyser.connect(audioCtx.destination);
+
+        visCanvas = document.getElementById("spectrogram");
+        visCtx = visCanvas.getContext("2d", { alpha: false });
+
+        tempCanvas = document.createElement("canvas");
+        tempCtx = tempCanvas.getContext("2d", { alpha: false });
+
+        const w = visCanvas.offsetWidth;
+        const h = visCanvas.offsetHeight;
+        visCanvas.width = w;
+        visCanvas.height = h;
+        tempCanvas.width = w;
+        tempCanvas.height = h;
+
+        drawVisualizer();
+      }
+
+      function drawVisualizer() {
+        if (isDrawing) return;
+        isDrawing = true;
+
+        function loop() {
+          if (ui.audio.paused && !state.isProcessing) {
+            isDrawing = false;
+            return;
+          }
+          requestAnimationFrame(loop);
+
+          const bufferLength = analyser.frequencyBinCount;
+          const dataArray = new Uint8Array(bufferLength);
+          analyser.getByteFrequencyData(dataArray);
+
+          tempCtx.drawImage(visCanvas, 0, 0);
+          visCtx.drawImage(tempCanvas, -1, 0);
+
+          const x = visCanvas.width - 1;
+          const h = visCanvas.height;
+          visCtx.fillStyle = "#000";
+          visCtx.fillRect(x, 0, 1, h);
+
+          for (let i = 0; i < bufferLength; i++) {
+            const value = dataArray[i];
+            if (value === 0) continue;
+            const y = h - Math.floor((i / bufferLength) * h);
+            visCtx.fillStyle = `hsl(${270 - (value / 255) * 270}, 100%, 50%)`;
+            visCtx.fillRect(x, y, 1, 2);
+          }
+        }
+        loop();
+      }
+
+      // --- Full Download ---
+      ui.btnFull.addEventListener("click", async () => {
+        if (state.isProcessing) return;
+        state.isProcessing = true;
+        ui.loader.innerText = "RENDERING FULL...";
+        ui.loader.style.display = "block";
+
+        try {
+          const ext = state.format === "opus" ? "ogg" : state.format;
+          const outName = `full_render.${ext}`;
+          const quality = ui.bitrateSlider.value;
+
+          const args = ["-i", "input.flac"];
+          switch (state.format) {
+            case "mp3":
+              args.push("-c:a", "libmp3lame", "-b:a", `${quality}k`);
+              break;
+            case "aac":
+              args.push("-c:a", "aac", "-b:a", `${quality}k`);
+              break;
+            case "ogg":
+              args.push("-c:a", "libvorbis", "-b:a", `${quality}k`);
+              break;
+            case "opus":
+              args.push("-c:a", "libopus", "-b:a", `${quality}k`);
+              break;
+            case "flac":
+              args.push("-c:a", "flac", "-compression_level", quality);
+              break;
+          }
+          args.push(outName);
+
+          await ffmpeg.run(...args);
+
+          const data = ffmpeg.FS("readFile", outName);
+          const blob = new Blob([data.buffer], {
+            type: "application/octet-stream",
+          });
+          const url = URL.createObjectURL(blob);
+
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = `${state.fileName.replace(
+            /\.[^/.]+$/,
+            ""
+          )}_${quality}.${ext}`;
+          a.click();
+
+          ffmpeg.FS("unlink", outName);
+        } catch (e) {
+          console.error(e);
+        } finally {
+          state.isProcessing = false;
+          ui.loader.style.display = "none";
+        }
+      });
+
+      function formatTime(seconds) {
+        const m = Math.floor(seconds / 60);
+        const s = Math.floor(seconds % 60);
+        return `${m}:${s.toString().padStart(2, "0")}`;
+      }
+    </script>
+  </body>
+</html>
